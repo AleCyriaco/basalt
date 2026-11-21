@@ -11,12 +11,13 @@ One setting picks the cards: `gpu`. It means the same in the server (`"gpu"` in 
 | --- | --- | --- |
 | not set | GPU 0 alone; one warning at start names the other visible cards | GPU 0 |
 | `"0,1"`, `"1,0"`, ... | exactly these, in this order | the first one listed |
-| `"auto"` | every visible Blackwell (sm_120) card, and when built with `-DPEER_ADA=ON`, every sm_89 card as an expert tier; any other card is skipped with one line naming it | the one with the most memory bandwidth, then the most VRAM |
+| `"auto"` | every visible Blackwell (sm_120) card, plus sm_86 with `-DPEER_AMPERE=ON` and sm_89 with `-DPEER_ADA=ON`; other cards are skipped with one line naming them | the Blackwell card with the most memory bandwidth, then the most VRAM |
 
 Cards are numbered as `nvidia-smi` numbers them. When `CUDA_VISIBLE_DEVICES` is set, the numbers count within its list
 (`CUDA_VISIBLE_DEVICES=1,0` makes `gpu 0` the card `nvidia-smi` calls 1), and its numbers are read as `nvidia-smi`'s
 too. A number past the visible cards, a card listed twice, a first card that is not sm_120, or a later card that is
-neither sm_120 nor (when built with `-DPEER_ADA=ON`) sm_89 stops the start with an error.
+neither sm_120 nor an enabled peer architecture stops the start with an error. Only Flash-Next accepts older peers;
+other models reject a selection containing them, including `auto`. Select the Blackwell cards explicitly for those models.
 
 The main card holds the dense weights, the KV cache, the drafter and its own expert cache. The engine decides what the
 other cards do and prints one line at start, for example `gpus: RTX 5090 (nvidia-smi 0) main, RTX 5060 Ti (nvidia-smi 1)
@@ -32,12 +33,13 @@ expert tier`:
   2,559 rows when it is slower (a slower card costs a longer chunk more than the experts it saves the main card's link).
   When its memory is faster than the main card's it takes a share of each GDN mixer and of the head (one start line
   each; see [the GDN split](../precision/qwen38-flash-next.md#gdn-split-across-two-cards)).
-- **Idle.** The engine runs up to three expert tiers: a fifth card and later ones stay idle. So does a card that would hold no
+- **Idle.** Flash-Next runs up to four expert tiers: a sixth card and later ones stay idle. So does a card that would hold no
   expert: when the main card holds every expert, or a card has no room for one, the start says `no expert tier` for that
   card and runs without it.
 
-Three or more cards are community-tested: the path is checked here on two cards, with two expert tiers sharing the
-second one. Reports from machines with three or four cards are welcome (see [community](../community.md)).
+Four expert tiers and mixed Ampere configurations are experimental. The routing parity test covers up to four logical
+tiers; that does not establish simultaneous execution on five physical GPUs. See the
+[Fedora validation procedure](../fedora-hybrid.md) for the hardware checks still required.
 
 ## What several cards do together
 
@@ -115,17 +117,20 @@ it holds.
 
 ## An older peer card
 
-One older architecture can be built for the peer's kernels: sm_89 (Ada), beside an sm_120 main card, enabled with the
-`-DPEER_ADA=ON` build flag (off by default to keep build times fast for users without a hybrid setup). Without this flag,
-or for a card of any other pre-Blackwell architecture, the card is refused at the start rather than failing at its first
-kernel. What such a peer does and does not do:
+Flash-Next's peer kernels can also be built for sm_86 (Ampere) with `-DPEER_AMPERE=ON` and sm_89 (Ada) with
+`-DPEER_ADA=ON`, beside an sm_120 main card. Both options are off by default and may be enabled together.
+Other architectures and peers whose option is disabled are refused at startup. Ampere execution and performance
+still require hardware validation. What such a peer does and does not do:
 
 - It holds experts and computes their rows in every decode window, with the standard-CUDA kernels (Q8_1/Q2_0 and the
-  GGUF i-quant rows, dp4a arithmetic) compiled for its own architecture. Where an expert sits does not change its rows.
+  supported GGUF integer-quantized rows, dp4a arithmetic) compiled for its own architecture. Cross-architecture
+  numerical parity must be measured before treating a mixed configuration as validated.
 - It reads its experts' share of a prompt chunk, under the slower-card rule above (chunks up to 2,559 rows).
 - It does not run the main card's work: the dense weights, the KV cache, the drafter, TMA and the FP4 tensor-core
-  expert kernels stay on the Blackwell card. An NVFP4 pack's FP4 experts are main-card only.
-- DeepSeek does not take an older peer: its peer-tier kernels are built for sm_120 only, and the start says so.
+  expert kernels stay on the Blackwell card. A pack containing NVFP4 experts is rejected when older peers are selected;
+  select only Blackwell cards or use compatible integer-quantized experts. NVFP4 dense weights on the main card are allowed.
+- DeepSeek, Qwen3.8-27B and Hy4-flash do not take older peers; the model capability check rejects them.
+- Prompt layer pipelines, GDN splits and head splits are disabled on older peers.
 - Layer split, overlapped windows and tensor parallel need matched Blackwell cards; an unlike pair always uses the
   expert tier, as before.
 

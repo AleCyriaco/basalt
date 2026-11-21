@@ -44,7 +44,7 @@ struct MgPlan {
     std::string line;                   ///< the start line
 };
 
-/// Whether `a` and `b` match in memory bandwidth and VRAM within 10% (an unknown figure matches).
+/// Whether both cards can run full-model kernels and match in bandwidth and VRAM within 10% (unknown figures match).
 bool cards_alike(const GpuCard& a, const GpuCard& b);
 
 /// Prices the mechanisms for `cards` (two or more, main first) and picks the cheapest one that runs. Only a set of alike

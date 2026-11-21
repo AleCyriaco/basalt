@@ -16,8 +16,8 @@ static int g_fail = 0;
     } while (0)
 #define CHECK_STR(got, want)                                                                         \
     do {                                                                                             \
-        const std::string g_ = (got);                                                                \
-        if (g_ != (want)) { std::printf("FAIL %s:%d: got \"%s\" want \"%s\"\n", __FILE__, __LINE__, g_.c_str(), want); ++g_fail; } \
+        const std::string g_ = (got), w_ = (want);                                                                \
+        if (g_ != w_) { std::printf("FAIL %s:%d: got \"%s\" want \"%s\"\n", __FILE__, __LINE__, g_.c_str(), w_.c_str()); ++g_fail; } \
     } while (0)
 
 static constexpr uint64_t G = 1ull << 30;
@@ -119,6 +119,13 @@ int main() {
         const std::vector<GpuCard> v = {card(0, "RTX 5070 Ti", 12, 0, 896, 16), card(1, "RTX 3090", 8, 6, 936, 24),
                                         card(2, "RTX 5090", 12, 0, 1792, 32), card(3, "RTX 5060 Ti", 12, 0, 448, 16)};
         GpuChoice c = pick("auto", v);
+#if defined(BASALT_PEER_AMPERE)
+        CHECK_STR(cards(c), "2,0,3,1");
+        CHECK(c.notes.size() == 1);
+        CHECK_STR(roles(v, c, 4), "main,expert tier,expert tier,expert tier");
+        c = pick("", v);
+        CHECK_STR(c.warning, "GPU 1 (RTX 3090), GPU 2 (RTX 5090), GPU 3 (RTX 5060 Ti) unused; use gpu 0,1,2,3 or gpu auto");
+#else
         CHECK_STR(cards(c), "2,0,3");
         CHECK(c.notes.size() == 1);
         if (c.notes.size() == 1) CHECK_STR(c.notes[0], "gpu auto: GPU 1 (RTX 3090) skipped, not sm_120");
@@ -129,6 +136,7 @@ int main() {
         c = pick("", v);
         CHECK_STR(cards(c), "0");
         CHECK_STR(c.warning, "GPU 2 (RTX 5090), GPU 3 (RTX 5060 Ti) unused; use gpu 0,2,3 or gpu auto");
+#endif
         CHECK_STR(pick("1", v).error, "gpu: GPU 1 (RTX 3090) is sm_86, not sm_120");
         CHECK_STR(cards(pick("3,2,0", v)), "3,2,0");
     }
@@ -146,6 +154,53 @@ int main() {
         CHECK(c.notes.size() == 1);
         if (c.notes.size() == 1) CHECK_STR(c.notes[0], "gpu auto: GPU 1 (RTX 4060 Ti) skipped, not sm_120");
 #endif
+    }
+    // The main card can be anywhere in a five-card inventory; all four peers keep their roles.
+    for (int main_at = 0; main_at < 5; ++main_at) {
+        std::vector<GpuCard> v;
+        for (int i = 0; i < 5; ++i)
+            v.push_back(i == main_at ? card(i, "RTX 5090", 12, 0, 1792, 32)
+                                    : card(i, "RTX 3090", 8, 6, 936, 24));
+        const auto c = pick("auto", v);
+        CHECK(c.error.empty() && c.cards.front() == main_at);
+        std::string explicit_list = std::to_string(main_at);
+        for (int i = 0; i < 5; ++i) if (i != main_at) explicit_list += "," + std::to_string(i);
+#if defined(BASALT_PEER_AMPERE)
+        CHECK_STR(cards(c), explicit_list);
+        CHECK_STR(cards(pick(explicit_list, v)), explicit_list);
+        CHECK_STR(roles(v, c, 4), "main,expert tier,expert tier,expert tier,expert tier");
+#else
+        CHECK_STR(cards(c), std::to_string(main_at));
+        CHECK(pick(explicit_list, v).error.find("-DPEER_AMPERE=ON") != std::string::npos);
+#endif
+        CHECK(!pick(std::to_string((main_at + 1) % 5), v).error.empty());
+    }
+    {
+        const auto main = card(0, "main", 12, 0, 1792, 32);
+        const auto peer = card(1, "peer", 8, 6, 936, 24);
+        CHECK(gpu_model_error({main, peer}, true).empty());
+        CHECK(!gpu_model_error({main, peer}, false).empty());
+        CHECK(gpu_model_error({main, main}, false).empty());
+        CHECK(gpu_model_error({main}, false).empty());
+        // Other architectures are not enabled by either peer option.
+        CHECK(!pick("0,1", {main, card(1, "unsupported", 8, 0, 936, 24)}).error.empty());
+        CHECK(!pick("0,1", {main, card(1, "unsupported", 9, 0, 936, 24)}).error.empty());
+    }
+    // Both optional architectures can coexist, without promoting an expert-only card to main.
+    {
+        const std::vector<GpuCard> v = {card(0, "Ampere", 8, 6, 936, 24),
+                                       card(1, "Ada", 8, 9, 1008, 24),
+                                       card(2, "main", 12, 0, 448, 16)};
+        std::string expected = "2";
+#if defined(BASALT_PEER_AMPERE)
+        expected += ",0";
+#endif
+#if defined(BASALT_PEER_ADA)
+        expected += ",1";
+#endif
+        CHECK_STR(cards(pick("auto", v)), expected);
+        CHECK(pick("auto", {v[0], v[1]}).cards.empty());
+        CHECK(!pick("auto", {v[0], v[1]}).error.empty());
     }
     // A laptop's own card beside a desktop card in an enclosure: the desktop card's bandwidth makes it main; the
     // laptop card is the first visible, so it runs alone when nothing is set.
@@ -232,6 +287,8 @@ int main() {
         CHECK_STR(holding(tiers_holding(eq, {{40, 448}, {0, 448}, {40, 448}})), "02");
         CHECK_STR(holding(tiers_holding(eq, {{0, 448}, {0, 448}})), "-");
         CHECK_STR(holding(tiers_holding(eq, {{10, 448}, {40, 448}})), "01");
+        CHECK_STR(owners(spread_experts(eq, {{20, 936}, {20, 936}, {20, 936}, {20, 936}})), "01230123");
+        CHECK_STR(holding(tiers_holding(eq, {{20, 936}, {20, 936}, {20, 936}, {20, 936}})), "0123");
     }
     if (g_fail) { std::printf("gpu_select_test: %d failures\n", g_fail); return 1; }
     std::printf("gpu_select_test: ok\n");

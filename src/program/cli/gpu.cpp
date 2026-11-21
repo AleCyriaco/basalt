@@ -11,7 +11,7 @@
 namespace basalt::program::cli {
 
 std::optional<int> select_gpus(CommonOptions& o, std::vector<GpuCard>& chosen_cards, int max_expert_tiers, bool prompt_split,
-                               const std::function<bool(double, double)>& layer_stage) {
+                               const std::function<bool(double, double)>& layer_stage, bool older_expert_cards) {
     namespace bp = basalt::program;
     bp::GpuSpec spec;
     std::string gerr;
@@ -27,7 +27,10 @@ std::optional<int> select_gpus(CommonOptions& o, std::vector<GpuCard>& chosen_ca
     }
     bool known = false;
     const std::vector<bp::GpuCard> visible = bp::visible_gpus(known);
-    const bp::GpuChoice choice = bp::choose_gpus(spec, visible, known);
+    bp::GpuChoice choice = bp::choose_gpus(spec, visible, known);
+    bp::RoleInputs ri;
+    for (int i : choice.cards) ri.cards.push_back((size_t) i < visible.size() ? visible[(size_t) i] : bp::GpuCard{});
+    if (choice.error.empty()) choice.error = bp::gpu_model_error(ri.cards, older_expert_cards);
     if (o.gpu_plan) {
         std::string lossy;
         for (const auto& f : o.lossy) lossy += (lossy.empty() ? "" : ",") + f.flag;
@@ -45,8 +48,25 @@ std::optional<int> select_gpus(CommonOptions& o, std::vector<GpuCard>& chosen_ca
                            seen, choice.cards.size());
         return 2;
     }
-    bp::RoleInputs ri;
-    for (int i : choice.cards) ri.cards.push_back((size_t) i < visible.size() ? visible[(size_t) i] : bp::GpuCard{});
+    // NVML may not report a capability. Validate the actual CUDA devices before any model allocation.
+    for (size_t d = 0; d < ri.cards.size(); ++d) {
+        cudaDeviceProp prop{};
+        if (cudaGetDeviceProperties(&prop, (int) d) != cudaSuccess) {
+            basalt::log::error("basalt", "gpu: cannot read CUDA device %zu properties", d);
+            return 2;
+        }
+        auto& c = ri.cards[d];
+        c.cc_major = prop.major;
+        c.cc_minor = prop.minor;
+        if (c.name.empty()) c.name = prop.name;
+        c.vram = prop.totalGlobalMem;
+    }
+    bp::GpuSpec actual;
+    actual.kind = bp::GpuSpec::Kind::List;
+    for (size_t d = 0; d < ri.cards.size(); ++d) actual.list.push_back((int) d);
+    std::string actual_error = bp::choose_gpus(actual, ri.cards).error;
+    if (actual_error.empty()) actual_error = bp::gpu_model_error(ri.cards, older_expert_cards);
+    if (!actual_error.empty()) { basalt::log::error("basalt", "%s", actual_error.c_str()); return 2; }
     ri.max_expert_tiers = max_expert_tiers;   // the device-planned tail's peer windows
     ri.prompt_split = prompt_split;
     ri.layer_stage = prompt_split && ri.cards.size() > 1 && layer_stage && layer_stage(ri.cards[0].mem_gbps, ri.cards[1].mem_gbps);

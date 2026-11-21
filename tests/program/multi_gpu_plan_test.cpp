@@ -86,6 +86,18 @@ int main() {
     CHECK(!cards_alike(card(0, "a", 960, 16), card(1, "b", 448, 16)));
     CHECK(!cards_alike(card(0, "a", 960, 16), card(1, "b", 960, 24)));
     CHECK(cards_alike(card(0, "a", 0, 0), card(1, "b", 960, 16)));   // unknown figures match
+    // A peer with similar memory figures still cannot run full-model stages.
+    {
+        const auto main = card(0, "main", 960, 24);
+        auto peer = card(1, "peer", 936, 24);
+        peer.cc_major = 8; peer.cc_minor = 6;
+        CHECK(!cards_alike(main, peer));
+        CHECK(plan_multi_gpu({main, peer}, model()).pick == Mechanism::ExpertTier);
+        std::vector<GpuCard> five = {card(0, "main", 1792, 32), peer, peer, peer, peer};
+        const auto p = plan_multi_gpu(five, model());
+        CHECK(!p.equal && p.pick == Mechanism::ExpertTier);
+        CHECK(p.line.find("5 cards") != std::string::npos);
+    }
     // one card: no choice at all
     {
         const MgPlan p = plan_multi_gpu({card(0, "RTX 5090", 1792, 32)}, model());

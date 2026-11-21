@@ -14,6 +14,16 @@ constexpr float EPS = 1e-6f;
 using Clock = std::chrono::steady_clock;
 inline double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
+inline bool main_kernel_device(int dev) {
+    int major = 0, minor = 0;
+    if (dev < 0 || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
+        cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess) {
+        (void) cudaGetLastError();
+        return false;
+    }
+    return major == 12 && minor == 0;
+}
+
 struct Bump {
     uint8_t* base = nullptr;
     uint64_t used = 0;

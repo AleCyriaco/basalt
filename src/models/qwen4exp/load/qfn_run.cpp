@@ -59,6 +59,11 @@ int run_engine(Options& o, std::vector<program::GpuCard>& chosen_cards) {
     }
     const basalt::core::PackFiles pack_files = basalt::core::PackFiles::from(srcs);
     const basalt::core::ExpertFiles expert_files = basalt::core::ExpertFiles::from(srcs);
+    const bool expert_only = std::any_of(chosen_cards.begin(), chosen_cards.end(), [](const auto& c) {
+        return !basalt::program::gpu_main_supported(c);
+    });
+    if (expert_only && !o.layer_split.empty())
+        return fatal_start_error("--layer-split requires sm_120 cards; older peers can only run experts");
     // ---- two or more cards: what they do together is priced and the cheapest mechanism the engine has runs (one card:
     // nothing to choose, and no other card is touched)
     if (chosen_cards.size() >= 2) {
@@ -84,7 +89,7 @@ int run_engine(Options& o, std::vector<program::GpuCard>& chosen_cards) {
     // the prompt-time layer split over the expert tier cards (PromptStage), and the most stages it may use, the main
     // card's included: every card on two cards or on three or more alike ones, none on three or more unlike cards
     // until measured on such a set.  With --batch a read splits only while no slot decodes.
-    bool split_want = o.serve && o.peer_device >= 1;
+    bool split_want = o.serve && o.peer_device >= 1 && !expert_only;
     bool split_alike = true;
     for (size_t i = 1; i < chosen_cards.size(); ++i)
         split_alike = split_alike && basalt::program::cards_alike(chosen_cards[0], chosen_cards[i]);
@@ -242,6 +247,9 @@ int run_engine(Options& o, std::vector<program::GpuCard>& chosen_cards) {
         const auto& lay = basalt::kernels::cpu::expert_layout();
         for (int64_t l = 0; lay.native && l < (int64_t) lay.fmt.size(); ++l) {
             const auto& f = lay.fmt[(size_t) l];
+            if (expert_only && (f.gu_type == 40 || f.up_type == 40 || f.d_type == 40))
+                return fatal_start_error("NVFP4 experts with older peers are not supported; select only sm_120 GPUs "
+                                         "or a pack with Q8/Q2 or supported GGUF integer-quantized experts");
             if (!basalt::kernels::native_expert_supported(f.gu_type, f.d_type, f.n_embd, f.n_ff, f.up_type)) {
                 char msg[224];
                 std::snprintf(msg, sizeof msg, "layer %lld's experts are %s%s%s/%s (ggml types %d/%d/%d), which "

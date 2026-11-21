@@ -11,7 +11,7 @@
 //   tail        route + native_expert_grouped + dec_moe_combine vs the old chain (grouped into hit rows, the mapped
 //               CPU/peer rows copied, hit add, native_moe_combine_multi)
 //   window      (two cards) 48 rings through the peer kernel: the peer rows vs native_expert_grouped on the peer
-//   peers       two further peers: the route's kinds, every ring and doorbell (one launch, split, glue) vs a CPU
+//   peers       up to three further peers: the route's kinds, every ring and doorbell (one launch, split, glue) vs a CPU
 //               reference, and the combine reading their rows as it reads the first peer's
 //   staged      (no peers) the share of CPU misses copied from host RAM into staging: the route's, the ring's, the
 //               glue's and the stage kernel's kinds vs a CPU reference of the split, the staged lists and bytes, and the
@@ -1335,53 +1335,68 @@ int main(int argc, char** argv) {
                 ck(cudaMemcpy(d_plan, &P, sizeof P, cudaMemcpyHostToDevice), "plan back");
             }
 
-            // further peers: CPU-held experts split between two more tiers (some held by several: the first tier
+            // further peers: CPU-held experts split between all extra tiers (some held by several: the first tier
             // that holds one takes it); the route in one launch, split in two and inside the glue launch, against a
             // CPU reference; the combine reading their rows as it reads the first peer's
-            {
+            for (int extra = 1; extra <= K::kDmMaxX; ++extra) {
                 // CUDA0 keeps every other expert it held, so the peers see enough entries
-                std::vector<int32_t> rr0(NE, -1), rx0(NE, -1), rx1(NE, -1);
+                std::vector<int32_t> rr0(NE, -1), rp = res1;
+                std::vector<std::vector<int32_t>> residency(extra, std::vector<int32_t>(NE, -1));
                 for (int e = 0; e < NE; ++e) {
                     if (res0[e] >= 0 && e % 2 == 0) rr0[e] = res0[e];
-                    if (rr0[e] < 0 && res1[e] < 0 && e % 3 != 2) (e % 3 == 0 ? rx0 : rx1)[e] = e % NX;
-                    if (e % 6 == 0) rx1[e] = e % NX;                      // x0 holds it too: x0's
-                    if (res1[e] >= 0 && e % 2 == 0) rx0[e] = e % NX;      // the first peer holds it too: its
+                    const int owner = (e / 3) % (extra + 1);
+                    if (rr0[e] < 0 && res1[e] < 0 && owner < extra) residency[owner][e] = e % NX;
+                    if (e % 6 == 0) residency.back()[e] = e % NX;  // overlapping placements
+                    if (res1[e] >= 0 && e % 2 == 0) residency[0][e] = e % NX;
                 }
+                // The first token guarantees work on every peer and a CPU miss at every window width.
+                for (int i = 0; i < extra + 2; ++i) {
+                    const int e = ids[i];
+                    rr0[e] = rp[e] = -1;
+                    for (auto& r : residency) r[e] = -1;
+                    if (i == 0) rp[e] = e % NX;
+                    else if (i <= extra) residency[i - 1][e] = e % NX;
+                }
+                int32_t* d_rp = dmal<int32_t>(NE);
+                ck(cudaMemcpy(d_rp, rp.data(), NE * 4, cudaMemcpyHostToDevice), "first peer residency");
                 int32_t* d_rr0 = dmal<int32_t>(NE);
-                int32_t* d_rx0 = dmal<int32_t>(NE);
-                int32_t* d_rx1 = dmal<int32_t>(NE);
                 ck(cudaMemcpy(d_rr0, rr0.data(), NE * 4, cudaMemcpyHostToDevice), "rr0");
-                ck(cudaMemcpy(d_rx0, rx0.data(), NE * 4, cudaMemcpyHostToDevice), "rx0");
-                ck(cudaMemcpy(d_rx1, rx1.data(), NE * 4, cudaMemcpyHostToDevice), "rx1");
-                K::DmRing* xr = hmap<K::DmRing>(2);
-                uint32_t* xw = hmap<uint32_t>(32);   // [0] the first further peer's doorbell, [16] the second's
+                std::vector<int32_t*> d_rx(extra);
+                K::DmRing* xr = hmap<K::DmRing>(extra);
+                uint32_t* xw = hmap<uint32_t>(16 * extra);
                 K::DmRouteArgs rx = ra;
                 rx.ring_m = h_rings + 6; rx.x_m = h_x + (size_t) 6 * MT * H; rx.xq_m = h_xq + 6 * xq_stride;
-                rx.ring = 7; rx.n_x = 2; rx.res0 = d_rr0;
-                rx.xres[0] = d_rx0; rx.xres[1] = d_rx1;
-                rx.xring_m[0] = xr; rx.xring_m[1] = xr + 1;
-                rx.xseq_m[0] = xw; rx.xseq_m[1] = xw + 16;
+                rx.ring = 7; rx.n_x = extra; rx.res0 = d_rr0; rx.res1 = d_rp;
+                for (int q = 0; q < extra; ++q) {
+                    d_rx[q] = dmal<int32_t>(NE);
+                    ck(cudaMemcpy(d_rx[q], residency[q].data(), NE * 4, cudaMemcpyHostToDevice), "extra residency");
+                    rx.xres[q] = d_rx[q]; rx.xring_m[q] = xr + q; rx.xseq_m[q] = xw + 16 * q;
+                }
                 std::vector<int32_t> xk(n);
-                int xc = 0, xp0 = 0, xn[2] = {0, 0};
+                int xc = 0, xp0 = 0;
+                std::vector<int> xn(extra, 0);
                 for (int i = 0; i < n; ++i) {
                     const int e = ids[i];
-                    xk[i] = rr0[e] >= 0 ? 0 : res1[e] >= 0 ? 2 : rx0[e] >= 0 ? 3 : rx1[e] >= 0 ? 4 : -1;
+                    xk[i] = rr0[e] >= 0 ? 0 : rp[e] >= 0 ? 2 : -1;
+                    for (int q = 0; xk[i] < 0 && q < extra; ++q)
+                        if (residency[q][e] >= 0) xk[i] = 3 + q;
                     xc += xk[i] < 0;
                     xp0 += xk[i] == 2;
                     if (xk[i] >= 3) ++xn[xk[i] - 3];
                 }
-                const int xall = xp0 + xn[0] + xn[1];
+                int xall = xp0;
+                for (int count : xn) xall += count;
                 auto rings_ok = [&](const K::DmPlan& Q, bool plan_kinds) {
                     size_t b = 0;
                     for (int i = 0; i < n; ++i) {
                         b += h_rings[6].kind[i] != xk[i] || h_rings[6].ids[i] != ids[i];
                         if (plan_kinds) b += Q.kind[i] != xk[i];
-                        for (int q = 0; q < 2; ++q)
+                        for (int q = 0; q < extra; ++q)
                             b += xr[q].ids[i] != ids[i] || xr[q].kind[i] != (xk[i] == 3 + q ? 2 : xk[i] >= 0 ? 0 : -1);
                     }
                     if (plan_kinds) b += Q.counts[2] != xall || Q.counts[3] != xc;
                     b += h_rings[6].n_peer != xp0 || h_rings[6].n_cpu != xc || h_rings[6].n_tok != T;
-                    for (int q = 0; q < 2; ++q) {
+                    for (int q = 0; q < extra; ++q) {
                         const uint32_t w = xw[16 * q];
                         b += xr[q].n_peer != xn[q] || xr[q].n_tok != T || (w & 0xffffu) != 7 ||
                              ((w >> 16) & 0xffu) != (uint32_t) T || ((w >> 28) & 1u) != (xn[q] > 0 ? 1u : 0u);
@@ -1391,9 +1406,9 @@ int main(int argc, char** argv) {
                 };
                 auto clear_rings = [&] {
                     std::memset((void*) (h_rings + 6), 0, sizeof(K::DmRing));
-                    std::memset((void*) xr, 0, 2 * sizeof(K::DmRing));
+                    std::memset((void*) xr, 0, extra * sizeof(K::DmRing));
                     h_words[0] = h_words[16] = 0;
-                    xw[0] = xw[16] = 0;
+                    for (int q = 0; q < extra; ++q) xw[16 * q] = 0;
                 };
                 clear_rings();
                 K::dec_moe_route(rx, s0);
@@ -1401,12 +1416,14 @@ int main(int argc, char** argv) {
                 K::DmPlan PX;
                 ck(cudaMemcpy(&PX, d_plan, sizeof PX, cudaMemcpyDeviceToHost), "plan");
                 size_t bx = rings_ok(PX, true);
+                for (int count : xn) bx += count == 0;
+                bx += xp0 == 0 || xc == 0;
                 if (xall > 0) bx += std::memcmp(down((const uint8_t*) d_xq2, (size_t) T * H / 32 * 36).data(),
                                                 h_xq + 6 * xq_stride, (size_t) T * H / 32 * 36) != 0;
-                std::snprintf(what, sizeof what, "route, peers T=%d (%d+%d+%d)", T, xp0, xn[0], xn[1]);
+                std::snprintf(what, sizeof what, "route, %d peers T=%d (%d rows)", extra + 1, T, xall);
                 report(what, l, bx, (size_t) n);
                 const std::vector<uint8_t> rbytes((const uint8_t*) (h_rings + 6), (const uint8_t*) (h_rings + 7));
-                const std::vector<uint8_t> xbytes((const uint8_t*) xr, (const uint8_t*) (xr + 2));
+                const std::vector<uint8_t> xbytes((const uint8_t*) xr, (const uint8_t*) (xr + extra));
                 {   // split: mode 1 then mode 2 leave the same rings and words
                     clear_rings();
                     void* d_pub = dmal<uint8_t>(xq_stride);
@@ -1446,7 +1463,7 @@ int main(int argc, char** argv) {
                     cudaFree(d_pt); cudaFree(d_p4);
                     ck(cudaMemcpy(d_plan, &PX, sizeof PX, cudaMemcpyHostToDevice), "plan back");
                 }
-                // the combine: further peers' rows read from the peers' rows as the first peer's (kinds 3, 4 as 2)
+                // the combine: further peers' rows read from the peers' rows as the first peer's (all extra kinds as 2)
                 ck(cudaMemsetAsync(d_parts, 0xff, (size_t) K::kDmCap * H * 4, s0), "memset");
                 K::native_expert_grouped(L, d_plan->ptr, d_plan->start, d_plan->counts, d_plan->dst, d_plan->tok, n, n,
                                          d_xq2, dv[0].scr, d_parts, s0);
@@ -1474,7 +1491,8 @@ int main(int argc, char** argv) {
                 std::memcpy(h_peer, peer.data(), peer.size() * 4);
                 std::snprintf(what, sizeof what, "combine, peers T=%d", T);
                 report(what, l, b4, (size_t) 2 * T * H);
-                cudaFree(d_ba); cudaFree(d_bb); cudaFree(d_po); cudaFree(d_rr0); cudaFree(d_rx0); cudaFree(d_rx1);
+                cudaFree(d_ba); cudaFree(d_bb); cudaFree(d_po); cudaFree(d_rr0); cudaFree(d_rp);
+                for (auto p : d_rx) cudaFree(p);
                 cudaFreeHost(xr); cudaFreeHost(xw);
                 ck(cudaMemcpy(d_plan, &P, sizeof P, cudaMemcpyHostToDevice), "plan back");   // the checks below read it
             }

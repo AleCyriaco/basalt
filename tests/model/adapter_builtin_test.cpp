@@ -21,6 +21,13 @@ int main() {
     };
     models::register_builtin_models();
     models::register_builtin_models();
+    for (const char* arch : {"qwen4exp", "deepseek41", "qwen35", "hy4flash"})
+        if (const auto* a = model::find_adapter(arch)) {
+            check(a->older_expert_cards() == (std::string(arch) == "qwen4exp"),
+                  "older peers only run on models with portable expert kernels");
+            if (std::string(arch) == "qwen4exp")
+                check(a->max_expert_cards() + 1 == 4, "four expert peers fit the device plan");
+        }
     // BASALT_MODELS decides which adapters exist: each built model is registered once, each left out is refused by name
     size_t built = 0;
     const auto expect = [&](const char* arch, bool is_built) {

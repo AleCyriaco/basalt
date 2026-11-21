@@ -165,7 +165,12 @@ bool Verifier::dm_init(std::string& err) {
             }
             {
                 const OnDevice onx(x.dev);
-                x.pblocks = std::max(1, dec_moe_peer_blocks(d->pq2) / sharing(x.dev));
+                const int blocks = dec_moe_peer_blocks(d->pq2);
+                if (blocks <= 0) {
+                    err = "verify: no executable expert peer kernel on CUDA device " + std::to_string(x.dev);
+                    return false;
+                }
+                x.pblocks = std::max(1, blocks / sharing(x.dev));
                 ok = ok && cudaStreamCreateWithFlags(&x.ps, cudaStreamNonBlocking) == cudaSuccess &&
                      basalt::kernels::dec_moe_table_load(x.ps) &&
                      cudaMalloc((void**) &x.ptab, (size_t) LE * 8) == cudaSuccess &&

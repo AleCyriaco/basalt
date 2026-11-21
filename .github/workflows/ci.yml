@@ -143,6 +143,12 @@ jobs:
       fail-fast: false
       matrix:
         model: [qwen4exp, deepseek41, qwen35, hy4flash]
+        peers: [none]
+        include:
+          - model: qwen4exp
+            peers: ampere
+          - model: qwen4exp
+            peers: ampere-ada
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -166,6 +172,8 @@ jobs:
           -DWERROR=ON
           -DBUILD_TESTING=ON
           -DBASALT_MODELS=${{ matrix.model }}
+          -DPEER_AMPERE=${{ matrix.peers != 'none' && 'ON' || 'OFF' }}
+          -DPEER_ADA=${{ matrix.peers == 'ampere-ada' && 'ON' || 'OFF' }}
           -DCMAKE_CUDA_ARCHITECTURES=120
           -DCMAKE_C_COMPILER_LAUNCHER=ccache
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache

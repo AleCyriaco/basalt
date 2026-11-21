@@ -15,6 +15,11 @@ The build fetches nothing. The ggml and llama.cpp parts Basalt uses (quantizatio
 
 `-DWERROR=ON` makes project warnings errors (CI sets it on Linux).
 
+Flash-Next can compile experimental expert-only peers with `-DPEER_AMPERE=ON` (sm_86) and
+`-DPEER_ADA=ON` (sm_89), separately or together. Keep `CMAKE_CUDA_ARCHITECTURES=120`:
+only the selected portable translation units receive additional device code.
+See [Fedora with mixed GPUs](fedora-hybrid.md) for build commands, restrictions and hardware validation.
+
 ## Building only some models
 
 `-DBASALT_MODELS=<ids>` is a semicolon list of architecture ids, or `all` (the default), which builds every model and follows the

@@ -13,6 +13,6 @@ namespace basalt::program::cli {
 // `prompt_split`): asked with the main and the second card's bandwidth once the cards are visible, whether the model splits its
 // layers across them.
 std::optional<int> select_gpus(CommonOptions& o, std::vector<GpuCard>& chosen_cards, int max_expert_tiers, bool prompt_split = false,
-                               const std::function<bool(double, double)>& layer_stage = {});
+                               const std::function<bool(double, double)>& layer_stage = {}, bool older_expert_cards = false);
 
 }  // namespace basalt::program::cli

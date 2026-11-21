@@ -341,6 +341,8 @@ public:
     virtual int quality_window() const { return 1; }
     /// The cards that may hold experts beside the main one.
     virtual int max_expert_cards() const = 0;
+    /// Whether this model has an expert-only path for separately compiled peer architectures.
+    virtual bool older_expert_cards() const { return false; }
     /// A model with no experts to put on a second card reads long prompts there instead (a one-stage prompt split, not an expert tier).
     virtual bool second_card_reads_prompts() const { return false; }
     /// Such a model with these flags does not fit its main card and splits its layers across the main card and the second

@@ -133,19 +133,17 @@ bool parse_gpu_spec(const std::string& text, GpuSpec& out, std::string& err) {
     return true;
 }
 
-// The main GPU runs the model's decode kernels (NVFP4 tensor cores, Blackwell instructions) — sm_120 only.
-// A peer GPU runs only the expert tier's standard CUDA kernels (Q8_1/Q2_0 rows, shared-memory rings,
-// doorbells), which a build with -DPEER_ADA=ON also compiles for sm_89 (Ada).
+// The main device needs the complete kernel set; peers may use a separately compiled expert-only set.
 bool gpu_main_supported(const GpuCard& c) { return c.cc_major == 0 || (c.cc_major == 12 && c.cc_minor == 0); }
-// sm_89 (Ada) is the one older architecture the peer kernels can be compiled for (when built with PEER_ADA);
-// a peer card of any other pre-Blackwell arch (or an sm_89 card without PEER_ADA) is rejected here
-// rather than failing later with 'no kernel image' at the first peer launch.
 bool gpu_peer_supported(const GpuCard& c) {
-#if defined(BASALT_PEER_ADA)
-    return c.cc_major == 0 || (c.cc_major == 12 && c.cc_minor == 0) || (c.cc_major == 8 && c.cc_minor == 9);
-#else
-    return c.cc_major == 0 || (c.cc_major == 12 && c.cc_minor == 0);
+    if (gpu_main_supported(c)) return true;
+#if defined(BASALT_PEER_AMPERE)
+    if (c.cc_major == 8 && c.cc_minor == 6) return true;
 #endif
+#if defined(BASALT_PEER_ADA)
+    if (c.cc_major == 8 && c.cc_minor == 9) return true;
+#endif
+    return false;
 }
 
 std::string gpu_label(const std::vector<GpuCard>& visible, int index) {
@@ -153,6 +151,14 @@ std::string gpu_label(const std::vector<GpuCard>& visible, int index) {
     if (index >= 0 && (size_t) index < visible.size() && !visible[(size_t) index].name.empty())
         s += " (" + visible[(size_t) index].name + ")";
     return s;
+}
+
+std::string gpu_model_error(const std::vector<GpuCard>& cards, bool older_expert_cards) {
+    if (older_expert_cards) return {};
+    for (size_t i = 1; i < cards.size(); ++i)
+        if (!gpu_main_supported(cards[i]))
+            return "gpu: " + gpu_label(cards, (int) i) + " is an expert-only peer; this model requires sm_120 helper cards";
+    return {};
 }
 
 GpuChoice choose_gpus(const GpuSpec& spec, const std::vector<GpuCard>& visible, bool known) {
@@ -186,7 +192,7 @@ GpuChoice choose_gpus(const GpuSpec& spec, const std::vector<GpuCard>& visible, 
             if (a.mem_gbps > b.mem_gbps || (a.mem_gbps == b.mem_gbps && a.vram > b.vram)) best = i;
         }
         c.cards.push_back(best);
-        // then the other sm_120 cards, then the sm_89 ones (a -DPEER_ADA=ON build) as expert tiers
+        // Other full-kernel devices first, then the expert-only peers.
         for (int i : main_ok)
             if (i != best) c.cards.push_back(i);
         for (int i : peer_ok)
@@ -215,7 +221,7 @@ GpuChoice choose_gpus(const GpuSpec& spec, const std::vector<GpuCard>& visible, 
         }
         return c;
     }
-    // Explicit list: the first card is the main (sm_120), the rest second cards (sm_120, or sm_89 with -DPEER_ADA=ON).
+    // Explicit list: the first card needs the complete kernel set; the rest need a compiled peer kernel set.
     for (size_t idx = 0; idx < spec.list.size(); ++idx) {
         const int i = spec.list[idx];
         if (known && i >= n) {
@@ -232,6 +238,13 @@ GpuChoice choose_gpus(const GpuSpec& spec, const std::vector<GpuCard>& visible, 
             return c;
         }
         if (known && idx > 0 && !gpu_peer_supported(visible[(size_t) i])) {
+#if !defined(BASALT_PEER_AMPERE)
+            if (visible[(size_t) i].cc_major == 8 && visible[(size_t) i].cc_minor == 6) {
+                c.error = "gpu: " + gpu_label(visible, i) + " is sm_86 (rebuild with -DPEER_AMPERE=ON to enable sm_86 peer support)";
+                c.cards.clear();
+                return c;
+            }
+#endif
 #if !defined(BASALT_PEER_ADA)
             if (visible[(size_t) i].cc_major == 8 && visible[(size_t) i].cc_minor == 9) {
                 c.error = "gpu: " + gpu_label(visible, i) + " is sm_89 (rebuild with -DPEER_ADA=ON to enable sm_89 peer support)";

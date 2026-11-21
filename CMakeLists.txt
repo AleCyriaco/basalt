@@ -16,9 +16,9 @@ endif()
 option(BUILD_TESTING "Build the tests and parity programs" OFF)
 # Covers the project's own C++ and CUDA sources only; off by default so a newer compiler's new warning cannot break a user build.
 option(WERROR "Treat compiler warnings as errors" OFF)
-# Optional peer architectures: building the peer-tier kernels for sm_89 (Ada) in addition to sm_120
-# allows a non-Blackwell card to serve as the expert tier, but adds build time.
+# Optional expert-only architectures add code to the portable peer translation units.
 option(PEER_ADA "Compile peer kernels for sm_89 (Ada) in addition to sm_120" OFF)
+option(PEER_AMPERE "Compile peer kernels for sm_86 (Ampere) in addition to sm_120" OFF)
 if(BUILD_TESTING)
   enable_testing()
 endif()
@@ -41,8 +41,7 @@ endfunction()
 # explicitly for the host-side programs that call the runtime themselves
 find_package(CUDAToolkit REQUIRED)
 # Main kernels (NVFP4 tensor cores, TMA, Blackwell instructions) compile for sm_120 only.
-# When PEER_ADA is enabled, peer kernels (Q8_1/Q2_0 expert rows, standard CUDA) additionally compile
-# for sm_89 (Ada) so a non-Blackwell card can serve as the expert tier.
+# Peer kernels compile separately for the architectures enabled by PEER_AMPERE and PEER_ADA.
 foreach(_a IN LISTS CMAKE_CUDA_ARCHITECTURES)
   string(REGEX REPLACE "[-a].*$" "" _base "${_a}")     # 120-real / 120a are still 120
   if(NOT _base STREQUAL "120")
@@ -432,10 +431,18 @@ target_link_libraries(basalt-load PRIVATE core kernels)
 endif()
 
 # Peer-tier compilation: the expert-window decode kernels, the peer prefill mmq/iota kernels and the
-# small utility kernels that run on the peer card additionally compile for sm_89 (Ada), so a non-Blackwell
-# card can serve as the expert tier. Must be set BEFORE the targets that compile these files are defined.
+# small utility kernels additionally compile for the enabled peer architectures.
+# Must be set BEFORE the targets that compile these files are defined.
+set(_peer_codegen)
+if(PEER_AMPERE)
+  add_compile_definitions(BASALT_PEER_AMPERE=1)
+  list(APPEND _peer_codegen "--generate-code=arch=compute_86,code=sm_86")
+endif()
 if(PEER_ADA)
   add_compile_definitions(BASALT_PEER_ADA=1)
+  list(APPEND _peer_codegen "--generate-code=arch=compute_89,code=sm_89")
+endif()
+if(_peer_codegen)
   set_source_files_properties(
     src/models/qwen4exp/kernels/dec_moe.cu
     src/models/qwen4exp/kernels/dec_moe_peer_q0_m0.cu
@@ -468,7 +475,7 @@ if(PEER_ADA)
     src/kernels/cuda/wait_abort.cu
     src/kernels/cuda/sampler.cu
     src/kernels/cuda/elementwise.cu
-    PROPERTIES COMPILE_OPTIONS "--generate-code=arch=compute_89,code=sm_89")
+    PROPERTIES COMPILE_OPTIONS "${_peer_codegen}")
 endif()
 
 # ---- kernels ----

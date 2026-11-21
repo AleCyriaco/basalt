@@ -3,7 +3,7 @@
 // The `gpu` setting means the same in the server, the engine, basalt-bench and basalt-probe:
 //   unset       the first visible card alone (one warning names the others when there are any);
 //   A,B,...     exactly these cards, in this order: the first is the main card;
-//   auto        every visible Blackwell card, the fastest (memory bandwidth, then VRAM) as the main card.
+//   auto        every supported card, the fastest main-capable card (bandwidth, then VRAM) as the main card.
 // Cards are numbered as nvidia-smi numbers them; under CUDA_VISIBLE_DEVICES the numbers count within that list. The
 // choice is made before any CUDA call and narrows CUDA_VISIBLE_DEVICES to the chosen cards, main first, so the engine
 // always runs on device 0 with the rest after it. The decisions are pure functions over a card table.
@@ -37,8 +37,10 @@ bool parse_gpu_spec(const std::string& text, GpuSpec& out, std::string& err);
 
 /// Whether the card can be the main card: compute capability 12.0, or unknown (nothing to check against).
 bool gpu_main_supported(const GpuCard& c);
-/// Whether the card can be a second card: as the main card, or 8.9 in a build with -DPEER_ADA=ON.
+/// Whether the card can be an expert peer: as the main card, or a separately enabled peer architecture.
 bool gpu_peer_supported(const GpuCard& c);
+/// Error when an expert-only peer is selected for a model whose helpers need the complete kernel set.
+std::string gpu_model_error(const std::vector<GpuCard>& cards, bool older_expert_cards);
 
 /// "GPU 1 (RTX 5060 Ti)": the visible number the user types, and the name when known.
 std::string gpu_label(const std::vector<GpuCard>& visible, int index);

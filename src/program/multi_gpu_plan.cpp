@@ -45,7 +45,8 @@ const char* mechanism_name(Mechanism m) {
 }
 
 bool cards_alike(const GpuCard& a, const GpuCard& b) {
-    return near(a.mem_gbps, b.mem_gbps) && near((double) a.vram, (double) b.vram);
+    return gpu_main_supported(a) && gpu_main_supported(b) &&
+           near(a.mem_gbps, b.mem_gbps) && near((double) a.vram, (double) b.vram);
 }
 
 MgPlan plan_multi_gpu(const std::vector<GpuCard>& cards, const MgModel& m) {

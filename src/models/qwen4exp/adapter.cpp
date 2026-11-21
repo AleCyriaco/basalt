@@ -29,6 +29,7 @@ public:
     }
 
     int max_expert_cards() const override { return kernels::kDmMaxX; }
+    bool older_expert_cards() const override { return true; }
 
     // pinned tiers; without --resident-experts a pack larger than free RAM is refused
     const char* quality_flags() const override { return "--spec 5 --adapt-swaps 0 --peer-adapt-swaps 0 --resident-experts"; }
